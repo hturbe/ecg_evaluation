@@ -2,10 +2,15 @@ import numpy as np
 import statsmodels.api as sm
 import pandas as pd
 import os
+from tqdm import tqdm
 from sklearn.feature_selection import SelectFromModel, mutual_info_regression
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
+from sklearn.model_selection import StratifiedKFold,RandomizedSearchCV
+from sklearn.metrics import matthews_corrcoef,f1_score
+from sklearn.pipeline import Pipeline
 from skfeature.utility.entropy_estimators import midd, cmidd
 from skfeature.function.information_theoretical_based.LCSI import lcsi
+from statsmodels.stats.outliers_influence import variance_inflation_factor
 import sys
 import matplotlib.pyplot as plt
 from scipy import stats
@@ -13,6 +18,36 @@ from scipy import stats
 sys.path.append(os.path.join(os.getcwd(), ".."))
 from kneed import KneeLocator
 
+def cal_vif(x):
+    """
+
+    Perform Variance Inflation Factor (VIF) Feature selection 
+    ##TODO Change it to JMI VIF feature selection
+
+    Args:
+        x (Pandas Dataframe): Design Matrix containing your feature
+
+    Returns:
+        output (Numpy Array 1D): Array containing the selected feature
+    """
+    thresh_up = 10
+    thresh_down = 5
+    output = pd.DataFrame()
+    k = x.shape[1]
+    vif = [variance_inflation_factor(x.values,i) for i in range(x.shape[1])]
+    for i in range(1,k):
+        a = np.argmax(vif)
+        print('Max vif is for variable no:',a)
+        if (vif[a]<=thresh_up and vif[a]>=thresh_down):
+            break
+        if (i==1):
+            output = x.drop(x.columns[a],axis=1)
+            vif = [variance_inflation_factor(output.values,j) for j in range(output.shape[1])]
+        elif (i>1):
+            output = output.drop(output.columns[a],axis=1)
+            vif = [variance_inflation_factor(output.values,j) for j in range(output.shape[1])]
+            
+    return output
 
 def backward_model_selection(X, y):
     """
@@ -57,11 +92,17 @@ def JMI_score(X, y):
     Returns:
         String List : List of the feature selected by the algorithm
     """
-    initial_feature_set = list(X.columns.values)
     X_dis = discretize_data(X)
-    F, _, _ = lcsi(X_dis, y.values.ravel(), function_name="JMI", n_selected_features=3)
+    feature_set = list(X_dis.columns.values)
+    X_dis = X_dis.values
+    F, _, _ = lcsi(
+        X_dis,
+        y.values.ravel(),
+        function_name="JMI",
+        n_selected_features=len(feature_set),
+    )
     F = list_noduplicate(F)
-    S = [initial_feature_set[i] for i in F]
+    S = [feature_set[i] for i in F]
     return S
 
 
@@ -113,7 +154,7 @@ def results_summary_to_dataframe(results):
     return results_df
 
 
-def hjmi_selection(X, y, max_iteration=20, print_plot=False):
+def hjmi_selection(X, y, max_iteration=20, print_plot=True):
     """
 
     Feature selection using the Historical JMI method
@@ -126,49 +167,55 @@ def hjmi_selection(X, y, max_iteration=20, print_plot=False):
 
     Returns:
         String List : List of the feature selected by the algorithm
+        Float List : List containing the HJMI value when considering each feature
+        FLoat List : List containing the delta value of each feature added.
     """
+    X = discretize_data(X)
+    columns_name = X.columns
+    X = X.values
+    y = y.values
     select_features = []
     collect_hjmi = []
     diff_m = []
-    X_dis = discretize_data(X)
-    initial_feature_set = list(X.columns.values)
     j_h = 0
-    jmi = np.zeros([len(initial_feature_set)])
-    for i in range(max_iteration):
-        for p in range(len(initial_feature_set)):
-            if initial_feature_set[p] in select_features:
+    for n in range(max_iteration):
+        jmi = np.zeros([X.shape[1]])
+        print("Iteration : ", n)
+        for k in range(X.shape[1]):
+            if k in select_features:
                 continue
-            JMI_1 = midd(X_dis[:, p], y.values.ravel())
+            JMI_1 = midd(X[:, k], y.ravel())
             JMI_2 = 0
-            for j in range(len(select_features)):
-                tmp1 = midd(X_dis[:, p], X_dis[:, j])
-                tmp2 = cmidd(X_dis[:, p], X_dis[:, j], y.values.ravel())
+            for j in select_features:
+                tmp1 = midd(X[:, k], X[:, j])
+                tmp2 = cmidd(X[:, k], X[:, j], y.ravel())
                 JMI_2 = JMI_2 + tmp1 - tmp2
-            jmi[p] = j_h + JMI_1
-            if i > 1:
-                jmi[p] = jmi[p] - (JMI_2) / (i - 1)
-        if i == 0:
+            if len(select_features) == 0:
+                jmi[k] = j_h + JMI_1
+            else:
+                jmi[k] = j_h + JMI_1 - JMI_2 / len(select_features)
+
+        if n == 0:
             j_h = np.max(jmi)
             hjmi = j_h
             ind = np.argmax(jmi)
-            select_features.append(initial_feature_set[ind])
+            select_features.append(ind)
             collect_hjmi.append(j_h)
 
         else:  # ((j_h-hjmi)/hjmi)>1e-10)
             j_h = np.max(jmi)
             ind = np.argmax(jmi)
-            if (j_h - hjmi) / (hjmi) > 0.13 and len(select_features) < len(
-                initial_feature_set
-            ):
+            print("diff : ", (j_h - hjmi) / (hjmi))
+            if (j_h - hjmi) / (hjmi) > 0.03 and len(select_features) < X.shape[1]:
                 diff_m.append((j_h - hjmi) / (hjmi))
                 hjmi = j_h
-                select_features.append(initial_feature_set[ind])
-                collect_hjmi.append(hjmi)
+                select_features.append(ind)
+                collect_hjmi.append(j_h)
             else:
                 break
-    if print_plot:
-        elbow_plot(diff_m)
-    return select_features, collect_hjmi
+        print("Name features added : ", columns_name[ind])
+
+    return select_features, collect_hjmi, diff_m
 
 
 def elbow_plot(elbow):
@@ -178,6 +225,7 @@ def elbow_plot(elbow):
     Args:
         elbow (1D Numpy array): Array containing the delta values in function of the number of features added
     """
+    print(elbow)
     n_feat = range(2, len(elbow) + 2)
     elbow_1 = KneeLocator(n_feat, elbow, curve="convex", direction="decreasing")
     fig, ax = plt.subplots()
@@ -204,17 +252,14 @@ def discretize_data(X_data):
         X_dis : Feature matrix with the associated discretize value for each feature (shape : [n_sample,n_feature])
     """
     ##Calculating number of bins necessary :
-    X_dis = np.zeros_like(X_data.values)
-    for j in X_data.columns.values:
-        i = list(X_data.columns.values).index(j)
-        if j == "HR" or j == "der_label":
-            X_dis[:, i] = X_data[j]
-        else:
-            X_f = X_data[j].values.copy()
-            Dx = freedman_diaconis(X_f, returnas="bins")
-            new_ref = np.linspace(0, 1, Dx)
-            ind = np.digitize(X_f, bins=np.linspace(0, 1, Dx))
-            X_dis[:, i] = [new_ref[i] for i in ind]
+
+    X_dis = X_data.copy()
+    for col in X_dis.columns:
+        if col == "sex":
+            continue
+        bins = np.histogram_bin_edges(X_dis[col].values, bins="fd")
+        ind = np.digitize(X_dis[col].values, bins=bins)
+        X_dis[col] = [bins[i - 1] for i in ind]
     return X_dis
 
 
@@ -261,3 +306,42 @@ def list_noduplicate(seq):
     seen = set()
     seen_add = seen.add
     return [x for x in seq if not (x in seen or seen_add(x))]
+
+def feature_selection_nested_cross_val(X,y,num_trial = 30):
+    ##TODO : Done only for logistic regression. Need to implement it for other model (SVM, decision tree,...)
+    columns_name = X.columns
+    X = X.values
+    y = y.values
+
+
+
+    ##Nested cross validation : 
+    features_name = np.array([])
+    mcc_score = np.array([])
+    f1score = np.array([])
+
+    for n in tqdm(range(num_trial),desc = "Number of trials done"):
+        
+        ##initialize fold : 
+        cv_outward = StratifiedKFold(n_splits = 5,shuffle=True,random_state=1)
+        cv_inner = StratifiedKFold(n_splits = 4,shuffle = True,random_state=1)
+        ## Access outter fold : 
+        for train,test in cv_outward.split(X,y):
+            select = SelectFromModel(LogisticRegression(penalty  = "elasticnet",solver="saga",l1_ratio=0.5))
+            pipeline_model = Pipeline([("select",select),("model",LogisticRegression(random_state=2))])
+            p_grid = {"select_max_features":np.linspace(1,len(columns_name)+1,10) ,"model__C":np.linspace(1,100,10)}
+            search = RandomizedSearchCV(pipeline_model, p_grid, scoring='f1', cv=cv_inner, refit=True)
+            results = search.fit(X[train],y[train])
+            best_model = results["model"].best_estimator_
+            prediction = best_model.predict(X[test])
+            mcc =matthews_corrcoef(y[test],prediction)
+            f1 = f1_score(y[test],prediction)
+            mcc_score = np.append(mcc_score,mcc)
+            f1score = np.append(f1score,f1)
+            features_name = np.append(features_name,columns_name[results["select"].get_support()])
+            if n%10 == 0:
+                print('>F1-score=%.3f, MCC = %.3f, est=%.3f, cfg=%s' % (f1,mcc, results.best_score_, results.best_params_))
+            # summarize the estimated performance of the model)
+    print(features_name)
+
+                

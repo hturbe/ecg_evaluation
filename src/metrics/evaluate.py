@@ -17,8 +17,22 @@ from shared_utils.utils_type import Results_Data
 
 
 def evaluate_index(
-    df_index: pd.DataFrame, df_label: pd.DataFrame, save_name=None, thres_metric=None
+    df_index: pd.DataFrame,
+    df_label: pd.DataFrame,
+    save_name=None,
+    aggregation="mean",
+    thres_metric=None,
 ):
+
+    """
+    Evaluate and compute metrics of a list of indices.
+
+    Args:
+        df_index (Pandas Dataframe) : Dataframe containing the indexes vaues for each patient (and each lead).
+        df_label (Pandas Dataframe) : Dataframe containing the quality label associated to each patient (for the 12 ECG lead).
+        save_name (String) : Name of folder where you want to save your results.
+        thres_metric (Float) : Threshold value given by the user (Default : None).
+    """
     if df_index.shape[1] > 1:
         raise ValueError(
             "One index is evaluated at each pass. df_index must have only one column"
@@ -37,16 +51,17 @@ def evaluate_index(
     data_results = Results_Data(save_name)
     data_results.append_results(np_prob[:, 1], np_prob[:, -1])
     if save_name is not None:
-        data_results.dump_to_file(save_name)
+        data_results.dump_to_file(save_name, aggregation)
 
     metrics_cv(
         data_results.dict_results,
         save_name,
+        aggregation=aggregation,
         t_used=thres_metric,
     )
 
 
-def evaluate_list_indices(input_data_path, list_features):
+def evaluate_list_indices(input_data_path, list_features, aggregation_methods="mean"):
     """Evaluate a list of indices
 
     Args:
@@ -56,6 +71,14 @@ def evaluate_list_indices(input_data_path, list_features):
     ds_metrics = xr.load_dataset(input_data_path)
     pbar = tqdm(list_features)
     for feature in pbar:
-        pbar.set_description(f"Evaluating {feature}")
-        df_X, df_y = extract_index_label(ds_metrics, feature)
-        evaluate_index(df_X, df_y, save_name=feature, thres_metric=None)
+        pbar.set_description(f"Evaluating {feature} using {aggregation_methods}")
+        df_X, df_y = extract_index_label(
+            ds_metrics, feature, aggregation_method=aggregation_methods
+        )
+        evaluate_index(
+            df_X,
+            df_y,
+            save_name=feature,
+            aggregation=aggregation_methods,
+            thres_metric=None,
+        )
